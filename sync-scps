@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+
+import os
+import subprocess
+import argparse
+import yaml
+import json
+import boto3
+
+
+# Define colors
+YELLOW = "\033[93m"
+LIGHT_BLUE = "\033[94m"
+GREEN = "\033[92m"
+RED = "\033[91m"
+GRAY = "\033[90m"
+END = "\033[0m"
+BOLD = "\033[1m"
+
+def printc(color, string, **kwargs):
+    print(f"{color}{string}\033[K{END}", **kwargs)
+
+
+def check_aws_sso_session():
+    try:
+        # Try to get the user's identity
+        subprocess.run(['aws', 'sts', 'get-caller-identity'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        # If the command failed, the user is not logged in
+        printc(RED, "You do not have a valid AWS SSO session. Please run 'aws sso login' and try again.")
+        return False
+
+    # If the command succeeded, the user is logged in
+    return True
+
+
+def fetch_all_scps(client):
+    printc(YELLOW, "Fetching list of all existing SCPs...")
+    paginator = client.get_paginator('list_policies')
+    scps = {}
+
+    for page in paginator.paginate(Filter='SERVICE_CONTROL_POLICY'):
+        for policy in page['Policies']:
+            scps[policy['Name']] = policy
+
+    printc(YELLOW, f"There are {len(scps)} SCPs in the system.")
+    return scps
+
+
+def check_scp_exists(scp_name, scps):
+    return scps[scp_name]['Id'] if scp_name in scps else None
+
+
+def scp_does_exist(client, scp_id, scp_name, scp_description, scp_str, dry_run):
+    printc(GREEN, "Exists.")
+    if dry_run:
+        printc(GREEN, "Dry run enabled. Would have updated SCP.")
+    else:
+        printc(YELLOW, "Updating SCP...")
+        response = client.update_policy(
+            PolicyId=scp_id,
+            Name=scp_name,
+            Description=scp_description,
+            Content=scp_str,
+        )
+        printc(GREEN, "SCP updated.")
+
+
+def scp_does_not_exist(client, scp_name, scp_description, scp_str, dry_run):
+    printc(YELLOW, "Does not exist.")
+    if dry_run:
+        printc(GREEN, "Dry run enabled. Would have created SCP.")
+        return None
+    else:
+        printc(YELLOW, "Creating SCP...")
+        response = client.create_policy(
+            Content=scp_str,
+            Description=scp_description,
+            Name=scp_name,
+            Type='SERVICE_CONTROL_POLICY',
+        )
+        scp_id = response['Policy']['PolicySummary']['Id']
+        printc(GREEN, f"SCP created with id: {scp_id}")
+        return scp_id
+
+
+def fetch_all_ous(client, parent_id=None, ous=None):
+    if ous is None:
+        ous = {}
+        printc(YELLOW, "Fetching list of all existing OUs...")
+
+    # Fetch the root ID if not provided
+    if parent_id is None:
+        roots = client.list_roots()
+        if roots['Roots']:
+            parent_id = roots['Roots'][0]['Id']
+            ous['Root'] = parent_id
+        else:
+            printc(RED, "No root found in the organization.")
+            return ous
+
+    # Fetch all OUs for the current parent
+    paginator = client.get_paginator('list_organizational_units_for_parent')
+    for page in paginator.paginate(ParentId=parent_id):
+        for ou in page['OrganizationalUnits']:
+            ous[ou['Name']] = ou['Id']
+
+            # Recursively fetch OUs for the current OU
+            fetch_all_ous(client, ou['Id'], ous)
+
+    return ous
+
+
+def fetch_all_attachments(client, scp_id):
+    paginator = client.get_paginator('list_targets_for_policy')
+    attachments = []
+    for page in paginator.paginate(PolicyId=scp_id):
+        for target in page['Targets']:
+            attachments.append(target['TargetId'])
+    return attachments
+
+
+def process_scp_attachments(client, scp_id, scp_targets, dry_run, ous):
+    # Fetch all current attachments for the SCP
+    current_attachments = set(fetch_all_attachments(client, scp_id))
+
+    # Prepare the desired attachments
+    desired_ou_attachments = {ous[ou_name]: ou_name for ou_name in scp_targets.get('organizational_units', [])}
+    desired_account_attachments = set(scp_targets.get('accounts', []))
+    desired_attachments = set(desired_ou_attachments.keys()).union(desired_account_attachments)
+
+    # Reverse mapping from OU IDs to names
+    ous_reverse = {v: k for k, v in ous.items()}
+
+    # Attachments to add are in desired but not in current
+    to_add = desired_attachments - current_attachments
+
+    # Attachments to remove are in current but not in desired
+    to_remove = current_attachments - desired_attachments
+
+    # Process attachments to add
+    for target_id in to_add:
+        target_name = ous_reverse.get(target_id, target_id)
+        if dry_run:
+            printc(GREEN, f"Dry run enabled. Would have attached SCP to target: {target_name}")
+        else:
+            printc(YELLOW, f"Attaching SCP to target: {target_name}")
+            client.attach_policy(PolicyId=scp_id, TargetId=target_id)
+            printc(GREEN, "SCP attached.")
+
+    # Process attachments to remove
+    for target_id in to_remove:
+        target_name = ous_reverse.get(target_id, target_id)
+        if dry_run:
+            printc(GREEN, f"Dry run enabled. Would have detached SCP from target: {target_name}")
+        else:
+            printc(YELLOW, f"Detaching SCP from target: {target_name}")
+            client.detach_policy(PolicyId=scp_id, TargetId=target_id)
+            printc(GREEN, "SCP detached.")
+
+
+def process_scp(client, data, config_dir, dry_run, existing_scps, ous):
+    scp_name = data['name']
+    scp_description = data['description'].strip()
+    scp_path = os.path.join(config_dir, data['resource_file'])
+    scp_targets = data['deployment_targets']
+
+    printc(LIGHT_BLUE, "--------------------------------------------------------------------------------")
+    printc(LIGHT_BLUE, scp_name)
+    printc(LIGHT_BLUE, "--------------------------------------------------------------------------------")
+    printc(YELLOW, scp_description)
+
+    # Read SCP file into 'scp_str' variable
+    with open(scp_path, 'r') as scp_file:
+        scp_str = scp_file.read()
+
+    obj = json.loads(scp_str)
+    scp_str = json.dumps(obj, separators=(',', ':'))
+    scp_length = len(scp_str)
+    if scp_length > 5120:
+        printc(RED, "\Minified SCP length is {scp_length} which exceeds 5120 characters. Skipping the SCP.")
+        return
+    printc(YELLOW, f"Minified SCP length: {scp_length}")
+
+    # Check if SCP already exists
+    scp_id = check_scp_exists(scp_name, existing_scps)
+    if scp_id:
+        scp_does_exist(client, scp_id, scp_name, scp_description, scp_str, dry_run)
+    else:
+        scp_id = scp_does_not_exist(client, scp_name, scp_description, scp_str, dry_run)
+
+    if scp_id:
+        process_scp_attachments(client, scp_id, scp_targets, dry_run, ous)
+    print()
+
+
+def main():
+    # Check that the user is logged in
+    if not check_aws_sso_session():
+        return
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config-dir', action='store', help='The directory containing the SCPs and the manifest')
+    parser.add_argument('--dry-run', action='store_true', help='Perform a dry run')
+    args = parser.parse_args()
+
+    if args.dry_run:
+        printc(GREEN, "\nThis is a dry run. No changes will be made.")
+
+    manifest_path = os.path.join(args.config_dir, 'manifest.yaml')
+    with open(manifest_path, 'r') as manifest_file:
+        manifest = yaml.safe_load(manifest_file)
+
+    client = boto3.client('organizations')
+
+    existing_scps = fetch_all_scps(client)
+    print()
+
+    ous = fetch_all_ous(client)
+    print()
+
+    for scp in manifest['scps']:
+        process_scp(client, scp, args.config_dir, args.dry_run, existing_scps, ous)
+
+
+
+if __name__ == '__main__':
+    main()

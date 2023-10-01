@@ -1,0 +1,9 @@
+# Deployment configuration
+
+repo-name    = "Foundation-service-control-policies"
+part-of      = 'foundation'
+
+
+[[Script]]
+name         = 'sync-scps'
+args         = [['--config-dir', '../Delegat-Install/apps/foundation/SCPs']]
