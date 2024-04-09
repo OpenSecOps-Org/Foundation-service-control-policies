@@ -178,7 +178,7 @@ def process_scp(client, data, config_dir, dry_run, existing_scps, ous):
     scp_str = json.dumps(obj, separators=(',', ':'))
     scp_length = len(scp_str)
     if scp_length > 5120:
-        printc(RED, "\Minified SCP length is {scp_length} which exceeds 5120 characters. Skipping the SCP.")
+        printc(RED, "Minified SCP length is {scp_length} which exceeds 5120 characters. Skipping the SCP.")
         return
     printc(YELLOW, f"Minified SCP length: {scp_length}")
 
