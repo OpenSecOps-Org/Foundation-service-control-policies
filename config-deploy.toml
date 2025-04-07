@@ -6,4 +6,4 @@ part-of      = 'foundation'
 
 [[Script]]
 name         = 'sync-scps'
-args         = [['--config-dir', '../CloudSecOps-Installer/apps/foundation/SCPs']]
+args         = [['--config-dir', '../Installer/apps/foundation/SCPs']]
