@@ -1,4 +1,6 @@
-# README
+# Foundation Service Control Policies
+
+[![Daily CVE scan](https://github.com/OpenSecOps-Org/Foundation-service-control-policies/actions/workflows/daily-scan.yml/badge.svg)](https://github.com/OpenSecOps-Org/Foundation-service-control-policies/actions/workflows/daily-scan.yml) [![OpenSSF Scorecard](https://github.com/OpenSecOps-Org/Foundation-service-control-policies/actions/workflows/scorecard.yml/badge.svg)](https://github.com/OpenSecOps-Org/Foundation-service-control-policies/actions/workflows/scorecard.yml)
 
 ## Deployment
 

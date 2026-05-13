@@ -1,0 +1,5 @@
+-r boto3.in
+
+# YAML parser used by sync-scps to read SCP definitions from
+# Installer/apps/foundation/SCPs/*.yaml.
+pyyaml>=6.0,<7.0
